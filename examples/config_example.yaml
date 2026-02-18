@@ -1,0 +1,258 @@
+# Example configuration for the paycheck calculator
+# Copy this file and customize with your specific values
+
+# Configuration version
+version: 2
+
+# Personal information
+person:
+  name: "John Doe"                    # REQUIRED: Your name
+  state: CA                          # State abbreviation
+  filing_status: single              # single, married_filing_jointly, etc.
+  start_date: "2024-03-15"          # REQUIRED: Employment start date (YYYY-MM-DD)
+
+# Calendar and pay frequency
+calendar:
+  years: [2024, 2025]               # Years to calculate
+  pay_frequency: semimonthly        # semimonthly, biweekly, monthly
+  trading_calendar: XNYS            # NYSE calendar for market data
+  holidays: US                      # Holiday calendar
+
+# Market data configuration
+market_data:
+  provider: yfinance                # Price data provider
+  symbol: AAPL                      # Default stock symbol
+  price_field: "Close"              # Price field to use
+  session_tz: "US/Eastern"          # Trading session timezone
+  cache_dir: ".cache/prices"        # Local cache directory
+
+# IRS contribution limits (2025 values)
+limits:
+  irs_402g_employee_deferral: 23500 # Employee deferral limit (pretax + Roth)
+  irs_415c_annual_additions: 69000  # Total annual additions limit
+  include_employer_in_415c: false   # Whether employer match counts toward 415(c)
+
+# Payroll configuration
+payroll:
+  salary_annual: 250000             # REQUIRED: Annual base salary
+  state: CA                         # State for payroll taxes
+  extra_income_per_period: 0        # Extra income per pay period (bonuses, etc.)
+  health_deductions_per_period: 0   # Health insurance deductions per period  
+  group_term_life_per_period: 0     # Group term life insurance per period
+  
+  # Tax base calculation rules:
+  # - Federal/State tax base: salary + extra_income + group_term_life - pretax_401k - health_deductions
+  # - FICA tax base: salary + extra_income + group_term_life - health_deductions
+  # - CA voluntary tax base: salary + extra_income + group_term_life - health_deductions - group_term_life
+  
+  # Contribution schedule (percentages can vary by pay period)
+  contribution_schedule:
+    pretax_401k_pct: [0.06, 0.06]  # Pre-tax 401(k) percentages
+    roth_401k_pct: [0.00]          # Roth 401(k) percentages  
+    aftertax_401k_pct: [0.12]      # After-tax 401(k) percentages
+    espp_pct: [0.15]               # ESPP percentages
+  
+  # Employer match configuration
+  employer_match:
+    mode: tiers                     # tiers or none
+    apply_only_to_employee_deferrals: true
+    tiers:
+      - match_rate: 1.00            # 100% match rate
+        up_to_usd: 6000             # Up to $6,000
+      - match_rate: 0.50            # 50% match rate  
+        up_to_usd: 11000            # Next $11,000
+  
+  # ESPP configuration
+  espp:
+    enabled: true                   # Enable ESPP
+    discount_pct: 0.15              # 15% discount
+    annual_limit_usd: 21250         # Annual contribution limit
+    limit_mode: contribution_usd    # contribution_usd or fmv_usd
+    allow_fractional_shares: false  # Allow fractional shares
+    purchase_months: [2, 8]         # February and August purchases
+    purchase_day_rule: last_trading_day
+    offering:
+      lookback_months: 24           # 24-month lookback period
+      first_offer_date: "2024-03-15"  # First offering date
+  
+  # First year adjustments
+  first_year_adjustments:
+    sign_on_bonus: 0                # Sign-on bonus amount
+    relocation_taxed: 0             # Taxed relocation amount
+    relocation_itemized: 0          # Itemized relocation (untaxed)
+    relocation_tax_advantaged: 0    # Tax-advantaged relocation (untaxed)
+    espp_eligibility_date: "2024-03-15"  # ESPP eligibility date
+
+# Tax configuration
+taxes:
+  tax_year: 2025                    # Tax year
+  
+  # Federal tax settings
+  federal:
+    method: python_taxes            # python_taxes or withholding_flat
+    filing_status: single           # Must match person.filing_status
+    extra_withholding_per_period: 0 # Extra withholding per pay period
+  
+  # State tax settings
+  state:
+    code: CA                        # State code (must match person.state)
+    method: tenforty_annualized     # tenforty_annualized or withholding_flat
+  
+  # FICA tax settings
+  fica:
+    social_security: true           # Apply Social Security tax
+    medicare: true                  # Apply Medicare tax
+  
+  # Supplemental withholding rates
+  supplemental:
+    rsu_withholding_rate: 0.37      # RSU withholding rate (37%)
+    bonus_withholding_rate: 0.22    # Bonus withholding rate (22%)
+  
+  # California-specific settings
+  ca:
+    voluntary_pct: 0.01             # CA 1% voluntary withholding
+
+# RSU grants (can have multiple)
+rsu_grants:
+  - grant_id: "RSU-2024A"          # Unique grant identifier
+    symbol: AAPL                    # Stock symbol
+
+    # Target value grant (calculates shares automatically)
+    target_value_usd: 140000        # Target grant value ($140k)
+    grant_date_rule: sixth_business_day_following_month  # Auto-calculate grant date
+    employment_start_date: "2024-03-15"  # Used for grant date and share calculation
+    
+    # Share calculation uses 30-day average ending on last day of start month
+    share_calculation:
+      method: "30_day_average"      # 30-day average method
+      price_field: "Close"          # Price field to use
+      rounding: "down"              # Round down to nearest whole share
+    
+    # Quarterly vesting schedule
+    schedule:
+      type: nvidia_quarterly        # Quarterly vesting with Wednesday rules
+      percentages: [6.25, 6.25, 6.25, 6.25, 6.25, 6.25, 6.25, 6.25,
+                   6.25, 6.25, 6.25, 6.25, 6.25, 6.25, 6.25, 6.25]  # 16 quarters
+      vest_day_rule: nvidia_wednesdays  # 3rd Wed Mar/Jun/Sep, 2nd Wed Dec
+    
+    # Share delivery method
+    withholding_method: shares      # shares or cash
+    
+    # Tax configuration (simplified flat rates)
+    tax:
+      federal_withholding_rate: 0.22  # 22% federal withholding
+      state_withholding_rate: 0.10    # 10% state withholding
+      apply_fica: true                # Apply FICA taxes to RSU income
+      apply_ca_voluntary: true        # Apply CA voluntary tax
+
+# Output configuration
+outputs:
+  directory: out                    # Output directory
+  write:
+    ledger: true                    # Write money ledger CSV
+    per_period: true                # Write pay periods CSV
+    per_year: true                  # Write year summary CSV
+    espp: true                      # Write ESPP purchases CSV
+    rsu: true                       # Write RSU vests CSV
+  include_tax_liability_estimates: true  # Include tax liability estimates
+
+# Format settings
+format:
+  date: "%Y-%m-%d"                  # Date format string
+  decimals: 4                       # Decimal places in output
+
+# Example of multiple RSU grants with different configurations:
+#
+# rsu_grants:
+#   # Target value grant with quarterly vesting
+#   - grant_id: "RSU-2024A"
+#     symbol: AAPL
+#     target_value_usd: 140000
+#     grant_date_rule: sixth_business_day_following_month
+#     employment_start_date: "2024-03-15"
+#     schedule:
+#       type: nvidia_quarterly
+#       percentages: [6.25, 6.25, 6.25, 6.25, 6.25, 6.25, 6.25, 6.25,
+#                    6.25, 6.25, 6.25, 6.25, 6.25, 6.25, 6.25, 6.25]
+#       vest_day_rule: nvidia_wednesdays
+#     withholding_method: shares
+#     tax:
+#       federal_withholding_rate: 0.22
+#       state_withholding_rate: 0.10
+#       apply_fica: true
+#       apply_ca_voluntary: true
+#   
+#   # Traditional fixed-share grant
+#   - grant_id: "RSU-2024B"
+#     symbol: AAPL
+#     total_shares: 200
+#     grant_date: "2024-10-01"
+#     schedule:
+#       type: per_year
+#       percentages: [25, 25, 25, 25]
+#       frequency: quarterly
+#     withholding_method: cash
+#     tax:
+#       federal_withholding_rate: 0.37  # Higher rate for senior employees
+#       state_withholding_rate: 0.12
+#       apply_fica: true
+#       apply_ca_voluntary: true
+#   
+#   # Custom vest dates grant
+#   - grant_id: "RSU-2024C"
+#     symbol: AAPL
+#     total_shares: 100
+#     grant_date: "2024-06-01"
+#     schedule:
+#       type: custom_dates
+#       percentages: [50, 50]
+#       custom_vest_dates: ["2025-06-01", "2026-06-01"]
+#     withholding_method: shares
+#     tax:
+#       federal_withholding_rate: 0.22
+#       state_withholding_rate: 0.10
+#       apply_fica: true
+#       apply_ca_voluntary: false  # No CA voluntary on this grant
+
+# Example of varying contribution percentages by pay period:
+#
+# payroll:
+#   contribution_schedule:
+#     pretax_401k_pct: [0.10, 0.08, 0.06, 0.04, 0.04]  # Decrease over time
+#     roth_401k_pct: [0.02, 0.04, 0.06, 0.08, 0.08]    # Increase over time
+#     aftertax_401k_pct: [0.15]                         # Constant
+#     espp_pct: [0.15, 0.15, 0.10, 0.10, 0.05]         # Decrease over time
+
+# Example with deductions and extra income:
+#
+# payroll:
+#   salary_annual: 200000
+#   extra_income_per_period: 500      # $500 extra per paycheck (e.g., car allowance)
+#   health_deductions_per_period: 300 # $300 health insurance per paycheck
+#   group_term_life_per_period: 25    # $25 group term life insurance per paycheck
+#   
+#   # This results in different tax bases:
+#   # - Federal/State: $8,333 + $500 + $25 - $401k - $300 = varies by 401k contribution
+#   # - FICA: $8,333 + $500 + $25 - $300 = $8,558 per paycheck
+#   # - CA voluntary: $8,333 + $500 + $25 - $300 - $25 = $8,533 per paycheck
+
+# Example with fractional start period (business days):
+#
+# person:
+#   start_date: "2025-07-28"  # Monday start
+#   # Results in:
+#   # - Skips July 16-31 period (partial)
+#   # - First paycheck on August 15 with 1.333x multiplier
+#   # - Covers July 28-31 (4 business days) + August 1-15 (11 business days)
+#   # - Fractional calculation: 4 worked days / 12 total business days in July period = 0.333
+
+# RSU Grant Logic Example (nvidia_quarterly type):
+#
+# For employment_start_date: "2024-03-15" with target_value_usd: 140000
+# 1. Grant date: 6th business day of April 2024 (following month)
+# 2. Share calculation: 30-day average price ending March 31, 2024
+# 3. Shares granted: $140,000 / average_price, rounded down
+# 4. First vest date: 3rd Wednesday of June 2024 (grant in Apr-Jun -> Sep first vest)
+# 5. Subsequent vests: Quarterly on 3rd Wed Mar/Jun/Sep, 2nd Wed Dec
+# 6. Each vest: 6.25% of total shares (16 vests total over 4 years)
+# 7. Whole-share rounding via cumulative floor method

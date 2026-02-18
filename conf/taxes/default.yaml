@@ -1,0 +1,16 @@
+tax_year: 2025
+federal:
+  method: python_taxes
+  filing_status: single
+  extra_withholding_per_period: 0
+state:
+  code: CA
+  method: tenforty_annualized
+fica:
+  social_security: true
+  medicare: true
+supplemental:
+  rsu_withholding_rate: 0.37
+  bonus_withholding_rate: 0.22
+ca:
+  voluntary_pct: 0.01

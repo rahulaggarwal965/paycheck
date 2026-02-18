@@ -1,0 +1,35 @@
+salary_annual: ???
+state: CA
+extra_income_per_period: 0
+health_deductions_per_period: 0
+group_term_life_per_period: 0
+contribution_schedule:
+  pretax_401k_pct: [0.0]
+  roth_401k_pct: [0.0]
+  aftertax_401k_pct: [0.0]
+  espp_pct: [0.0]
+employer_match:
+  mode: tiers
+  apply_only_to_employee_deferrals: true
+  tiers:
+    - match_rate: 1.00
+      up_to_usd: 6000
+    - match_rate: 0.50
+      up_to_usd: 11000
+espp:
+  enabled: false
+  discount_pct: 0.15
+  annual_limit_usd: 21250
+  limit_mode: contribution_usd
+  allow_fractional_shares: false
+  purchase_months: [2, 8]
+  purchase_day_rule: last_trading_day
+  offering:
+    lookback_months: 24
+    first_offer_date: null
+first_year_adjustments:
+  sign_on_bonus: 0
+  relocation_taxed: 0
+  relocation_itemized: 0
+  relocation_tax_advantaged: 0
+  espp_eligibility_date: null

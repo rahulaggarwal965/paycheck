@@ -1,0 +1,5 @@
+provider: yfinance
+symbol: ???
+price_field: Close
+session_tz: US/Eastern
+cache_dir: .cache/prices

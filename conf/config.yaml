@@ -1,0 +1,29 @@
+defaults:
+  - market_data: default
+  - calendar: semimonthly
+  - limits: "2025"
+  - payroll: default
+  - taxes: default
+  - rsu: default
+  - _self_
+
+version: 2
+person:
+  name: ???
+  state: CA
+  filing_status: single
+  start_date: ???
+
+outputs:
+  directory: out
+  write:
+    ledger: true
+    per_period: true
+    per_year: true
+    espp: true
+    rsu: true
+  include_tax_liability_estimates: true
+
+format:
+  date: "%b %-d, %Y"
+  decimals: 2

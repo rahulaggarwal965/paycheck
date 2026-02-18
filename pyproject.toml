@@ -1,0 +1,28 @@
+[project]
+name = "paycheck"
+version = "0.1.0"
+description = "Comprehensive paycheck calculator with ESPP, RSU, 401(k) matching, and unified tax withholding"
+readme = "README.md"
+authors = [
+    { name = "Rahul Aggarwal", email = "rahulaggarwal965@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "polars>=0.20.0",
+    "pydantic>=2.0.0",
+    "hydra-core>=1.3.0",
+    "yfinance>=0.2.0",
+    "tenforty>=0.1.0",
+    "python-dateutil>=2.8.0",
+    "python-taxes>=0.7.0",
+]
+
+[project.optional-dependencies]
+trading = [
+    "exchange_calendars>=4.0.0",
+    "pandas_market_calendars>=4.0.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.8.2,<0.9.0"]
+build-backend = "uv_build"
