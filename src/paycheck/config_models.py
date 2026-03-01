@@ -93,6 +93,9 @@ class ESPPConfig(BaseModel):
 class FirstYearAdjustments(BaseModel):
     """First year adjustments (sign-on bonus, relocation, etc.)."""
     sign_on_bonus: float = Field(default=0.0, ge=0.0, description="Sign-on bonus amount")
+    sign_on_pretax_401k_pct: float = Field(default=0.0, ge=0.0, le=1.0, description="Pre-tax 401(k) contribution pct for sign-on bonus")
+    sign_on_roth_401k_pct: float = Field(default=0.0, ge=0.0, le=1.0, description="Roth 401(k) contribution pct for sign-on bonus")
+    sign_on_aftertax_401k_pct: float = Field(default=0.0, ge=0.0, le=1.0, description="After-tax 401(k) contribution pct for sign-on bonus")
     relocation_taxed: float = Field(default=0.0, ge=0.0, description="Taxed relocation amount")
     relocation_itemized: float = Field(default=0.0, ge=0.0, description="Itemized relocation amount")
     relocation_tax_advantaged: float = Field(default=0.0, ge=0.0, description="Tax-advantaged relocation amount")

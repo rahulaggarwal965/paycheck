@@ -38,14 +38,11 @@ def process_first_year_adjustments(config: AppConfig, tax_engine: UnifiedTaxEngi
         logger.info(f"Processing sign-on bonus: ${adjustments.sign_on_bonus:,.2f}")
         
         # Sign-on bonus allows 401k contributions but no ESPP
-        # Use first period's contribution rates or defaults
-        first_period_rates = _get_first_period_contribution_rates(config)
-        
         contrib_result = contrib_engine.process_period(
             gross_pay=adjustments.sign_on_bonus,
-            pretax_pct=first_period_rates["pretax_401k_pct"],
-            roth_pct=first_period_rates["roth_401k_pct"],
-            aftertax_pct=first_period_rates["aftertax_401k_pct"],
+            pretax_pct=adjustments.sign_on_pretax_401k_pct,
+            roth_pct=adjustments.sign_on_roth_401k_pct,
+            aftertax_pct=adjustments.sign_on_aftertax_401k_pct,
             espp_pct=0.0  # No ESPP on sign-on bonus
         )
         
@@ -100,33 +97,6 @@ def process_first_year_adjustments(config: AppConfig, tax_engine: UnifiedTaxEngi
     for r in results:
         logger.info(f"Result: {r}")
     return results
-
-
-def _get_first_period_contribution_rates(config) -> dict:
-    """Get contribution rates for the first pay period.
-    
-    Args:
-        config: Application configuration object
-        
-    Returns:
-        Dictionary with first period contribution rates
-    """
-    schedule = config.payroll.contribution_schedule
-    
-    def get_first_rate(pct_input):
-        if isinstance(pct_input, (int, float)):
-            return float(pct_input)
-        elif isinstance(pct_input, list) and len(pct_input) > 0:
-            return float(pct_input[0])
-        else:
-            return 0.0
-    
-    return {
-        "pretax_401k_pct": get_first_rate(schedule.pretax_401k_pct),
-        "roth_401k_pct": get_first_rate(schedule.roth_401k_pct),
-        "aftertax_401k_pct": get_first_rate(schedule.aftertax_401k_pct),
-        "espp_pct": get_first_rate(schedule.espp_pct)
-    }
 
 
 def validate_legacy_compatibility(config, year_results: dict) -> dict:

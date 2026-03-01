@@ -1,19 +1,19 @@
 """Main computation pipeline integrating all engines."""
 
 import logging
-from typing import Any, Dict, List, Optional, Tuple, TypedDict, Union
+from typing import Any, Dict, List, TypedDict, Union
 
 import polars as pl
 
-from paycheck.config_models import AppConfig, FirstYearAdjustments
-from paycheck.contrib.engine import ContributionEngine, ContributionResult
+from paycheck.config_models import AppConfig
+from paycheck.contrib.engine import ContributionEngine
 from paycheck.espp.engine import ESPPEngine
 from paycheck.mappers.legacy import process_first_year_adjustments
 from paycheck.outputs.writers import OutputWriter
 from paycheck.payroll.calendar import PayPeriodCalendar
 from paycheck.prices.yahoo import YahooPriceFetcher
 from paycheck.rsu.engine import RSUEngine
-from paycheck.taxes.withholding import TaxEvent, TaxResult, UnifiedTaxEngine
+from paycheck.taxes.withholding import TaxEvent, UnifiedTaxEngine
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +62,13 @@ def resolve_year_config(config: AppConfig, year: int) -> YearConfig:
         if overrides.contribution_schedule is not None:
             yc.contribution_schedule = overrides.contribution_schedule
         if overrides.limits is not None:
-            yc.limits = overrides.limits
+            # Merge only explicitly-set fields so unspecified fields
+            # (e.g. include_employer_in_415c) are preserved from base config.
+            override_fields = {
+                k: getattr(overrides.limits, k)
+                for k in overrides.limits.model_fields_set
+            }
+            yc.limits = config.limits.model_copy(update=override_fields)
         if overrides.tax_year is not None:
             yc.tax_year = overrides.tax_year
         if overrides.espp_annual_limit_usd is not None:
@@ -135,6 +141,7 @@ def run_paycheck_pipeline(config: AppConfig) -> None:
             first_year_adjustments=year_results.get("first_year_adjustments"),
             first_year_config=year_config.first_year_adjustments,
             start_date=config.person.start_date,
+            ledger_events=year_results.get("ledger_events"),
         )
         
         # Log summary
@@ -263,17 +270,26 @@ def _process_year(config, engines: Dict[str, Any], year: int,
     # Process RSU vests
     rsu_vests = _process_rsu_vests(engines, year)
 
-    # Generate year summary
-    year_summary = _generate_year_summary(
-        config, engines, periods_data, espp_purchases, rsu_vests, first_year_adjustments, cfg=cfg
+    # Create money ledger events (single source of truth for summary)
+    ledger_events = engines["output_writer"].create_money_ledger_events(
+        periods_data, espp_purchases, rsu_vests, first_year_adjustments,
+        first_year_config=cfg.first_year_adjustments,
+        start_date=config.person.start_date,
     )
-    
+
+    # Generate year summary from ledger events
+    dp = config.format.decimals
+    year_summary = _generate_year_summary_from_ledger(
+        ledger_events, espp_purchases, rsu_vests, engines, dp
+    )
+
     return {
         "periods_data": periods_data,
         "espp_purchases": espp_purchases,
         "rsu_vests": rsu_vests,
         "year_summary": year_summary,
-        "first_year_adjustments": first_year_adjustments
+        "first_year_adjustments": first_year_adjustments,
+        "ledger_events": ledger_events,
     }
 
 
@@ -496,161 +512,107 @@ def _process_rsu_vests(engines: Dict[str, Any], year: int) -> List:
     return engines["rsu_engine"].process_all_grants_for_year(year)
 
 
-def _generate_year_summary(config, engines: Dict[str, Any], periods_data: List[Dict[str, Any]],
-                          espp_purchases: List, rsu_vests: List,
-                          first_year_adjustments: Optional[List[Tuple[str, Optional[ContributionResult], TaxResult]]] = None,
-                          cfg: YearConfig = None) -> Dict[str, Any]:
-    """Generate year summary statistics.
+def _generate_year_summary_from_ledger(
+    ledger_events: List[Dict[str, Any]],
+    espp_purchases: List,
+    rsu_vests: List,
+    engines: Dict[str, Any],
+    dp: int = 2,
+) -> Dict[str, Any]:
+    """Generate year summary derived from money ledger events (single source of truth).
 
     Args:
-        config: Application configuration object
-        engines: Dictionary of engines
-        periods_data: Pay period data
-        espp_purchases: ESPP purchase objects
-        rsu_vests: RSU vest objects
-        first_year_adjustments: First year adjustment data
-        cfg: Resolved per-year configuration
+        ledger_events: Money ledger events (the canonical data)
+        espp_purchases: ESPP purchases (for metadata)
+        rsu_vests: RSU vests (for metadata)
+        engines: Dictionary of engines (for engine summaries)
+        dp: Decimal places for rounding (must match write_money_ledger)
 
     Returns:
         Year summary dictionary
     """
-    # Aggregate payroll totals (include extra income, group term life)
-    total_gross_pay = 0.0
-    total_extra_income = 0.0
-    total_group_term_life = 0.0
+    def _safe_sum(values):
+        """Sum values, rounding each to dp first (matches write_money_ledger TOTAL logic)."""
+        return round(sum(round(v, dp) for v in values if v is not None and v != ""), dp)
 
-    for p in periods_data:
-        total_gross_pay += p["gross_pay"]
-        total_extra_income += p["extra_income"]
-        total_group_term_life += p["group_term_life"]
-    
-    # Total income includes all components
-    total_income = total_gross_pay + total_extra_income + total_group_term_life
-    total_pretax_401k = sum(p["pretax_401k"] for p in periods_data)
-    total_roth_401k = sum(p["roth_401k"] for p in periods_data)
-    total_aftertax_401k = sum(p["aftertax_401k"] for p in periods_data)
-    total_employer_match = sum(p["employer_match"] for p in periods_data)
-    total_espp_contrib = sum(p["espp_contrib"] for p in periods_data)
-    
-    # Tax totals
-    total_federal = sum(p["federal_withholding"] for p in periods_data)
-    total_state = sum(p["state_withholding"] for p in periods_data)
-    total_ss = sum(p["social_security"] for p in periods_data)
-    total_medicare = sum(p["medicare"] for p in periods_data)
-    total_ca_voluntary = sum(p["ca_voluntary_tax"] for p in periods_data)
-    total_tax_paid = sum(p["total_tax_paid"] for p in periods_data)
-    total_net_cash = sum(p["net_cash"] for p in periods_data)
-    total_final_take_home = sum(p["final_take_home"] for p in periods_data)
+    # Sum ledger event columns (same logic as write_money_ledger TOTAL row)
+    sum_cols = [
+        "gross_amount", "pretax_401k", "employer_match",
+        "taxable_wages", "social_security", "medicare",
+        "federal_withholding", "state_withholding", "ca_voluntary_tax",
+        "total_tax_paid", "post_tax_pay",
+        "roth_401k", "aftertax_401k", "espp_contrib", "net_amount",
+    ]
+    totals = {col: _safe_sum(e.get(col) for e in ledger_events) for col in sum_cols}
 
-    # Add first year adjustments
-    if first_year_adjustments:
-        for adjustment_type, contrib_result, tax_result in first_year_adjustments:
-            if adjustment_type == "sign_on_bonus":
-                total_gross_pay += tax_result.federal_tax_base + (contrib_result.pretax_401k if contrib_result else 0)
-                if contrib_result:
-                    total_pretax_401k += contrib_result.pretax_401k
-                total_federal += tax_result.federal_withholding
-                total_state += tax_result.state_withholding
-                total_ss += tax_result.social_security
-                total_medicare += tax_result.medicare
-                total_ca_voluntary += tax_result.ca_voluntary_tax
-                total_tax_paid += tax_result.total_tax_paid
-                total_net_cash += tax_result.net_cash
-                total_final_take_home += tax_result.net_cash
-            elif adjustment_type == "relocation_taxed":
-                total_gross_pay += tax_result.federal_tax_base
-                total_federal += tax_result.federal_withholding
-                total_state += tax_result.state_withholding
-                total_ss += tax_result.social_security
-                total_medicare += tax_result.medicare
-                total_ca_voluntary += tax_result.ca_voluntary_tax
-                total_tax_paid += tax_result.total_tax_paid
-                total_net_cash += tax_result.net_cash
-                total_final_take_home += tax_result.net_cash
+    total_income = totals["gross_amount"]
+    total_taxes = totals["total_tax_paid"]
+    total_net = totals["net_amount"]
+    effective_tax_rate = total_taxes / total_income if total_income > 0 else 0.0
 
-    # Add untaxed relocation amounts to net (use resolved first_year_adjustments)
-    adj = cfg.first_year_adjustments if cfg else config.payroll.first_year_adjustments
-    if first_year_adjustments and adj.relocation_itemized > 0:
-        total_net_cash += adj.relocation_itemized
-        total_final_take_home += adj.relocation_itemized
-    if first_year_adjustments and adj.relocation_tax_advantaged > 0:
-        total_net_cash += adj.relocation_tax_advantaged
-        total_final_take_home += adj.relocation_tax_advantaged
-    
-    # RSU totals (only actual, non-projected vests)
-    actual_rsu_vests = [v for v in rsu_vests if not v.is_projected]
-    projected_rsu_vests = [v for v in rsu_vests if v.is_projected]
-    rsu_gross = sum(v.gross_amount for v in actual_rsu_vests)
-    rsu_tax_paid = sum(v.total_tax_paid for v in actual_rsu_vests)
-    rsu_net_value = sum(v.net_cash_value for v in actual_rsu_vests)
+    # RSU metadata
+    actual_rsu = [v for v in rsu_vests if not v.is_projected]
+    projected_rsu = [v for v in rsu_vests if v.is_projected]
 
-    # ESPP totals (only actual, non-pending purchases)
+    # ESPP metadata
     actual_espp = [p for p in espp_purchases if not p.is_pending]
     pending_espp = [p for p in espp_purchases if p.is_pending]
-    espp_total_contrib = sum(p.contributions for p in actual_espp)
-    espp_total_shares = sum(p.shares_purchased for p in actual_espp if p.shares_purchased is not None)
-    espp_total_discount = sum(
-        p.discount_applied * p.shares_purchased
-        for p in actual_espp
-        if p.discount_applied is not None and p.shares_purchased is not None
-    )
-    
-    # Get engine summaries
+
+    # Engine summaries
     contrib_summary = engines["contrib_engine"].get_ytd_summary()
     tax_summary = engines["tax_engine"].get_ytd_summary()
     espp_summary = engines["espp_engine"].get_ytd_summary()
-    
-    # Calculate effective tax rate
-    total_income_with_rsu = total_income + rsu_gross
-    total_taxes = total_tax_paid + rsu_tax_paid
-    effective_tax_rate = total_taxes / total_income_with_rsu if total_income_with_rsu > 0 else 0.0
-    
+
     return {
         "payroll": {
-            "total_gross_pay": total_gross_pay,
-            "total_pretax_401k": total_pretax_401k,
-            "total_roth_401k": total_roth_401k,
-            "total_aftertax_401k": total_aftertax_401k,
-            "total_employer_match": total_employer_match,
-            "total_espp_contrib": total_espp_contrib,
-            "total_net_cash": total_net_cash,
-            "total_final_take_home": total_final_take_home
+            "total_gross_pay": totals["gross_amount"],
+            "total_pretax_401k": totals["pretax_401k"],
+            "total_roth_401k": totals["roth_401k"],
+            "total_aftertax_401k": totals["aftertax_401k"],
+            "total_employer_match": totals["employer_match"],
+            "total_espp_contrib": totals["espp_contrib"],
+            "total_net_cash": totals["post_tax_pay"],
+            "total_final_take_home": totals["net_amount"],
         },
         "taxes": {
-            "total_federal": total_federal,
-            "total_state": total_state,
-            "total_social_security": total_ss,
-            "total_medicare": total_medicare,
-            "total_ca_voluntary": total_ca_voluntary,
-            "total_tax_paid": total_tax_paid
+            "total_federal": totals["federal_withholding"],
+            "total_state": totals["state_withholding"],
+            "total_social_security": totals["social_security"],
+            "total_medicare": totals["medicare"],
+            "total_ca_voluntary": totals["ca_voluntary_tax"],
+            "total_tax_paid": totals["total_tax_paid"],
         },
         "rsu": {
-            "total_gross_value": rsu_gross,
-            "total_tax_paid": rsu_tax_paid,
-            "total_net_value": rsu_net_value,
-            "vests_count": len(actual_rsu_vests),
-            "projected_vests_count": len(projected_rsu_vests),
-            "projected_shares": sum(v.shares_vested for v in projected_rsu_vests),
+            "total_gross_value": sum(v.gross_amount for v in actual_rsu if v.gross_amount),
+            "total_tax_paid": sum(v.total_tax_paid for v in actual_rsu if v.total_tax_paid),
+            "total_net_value": sum(v.net_cash_value for v in actual_rsu if v.net_cash_value),
+            "vests_count": len(actual_rsu),
+            "projected_vests_count": len(projected_rsu),
+            "projected_shares": sum(v.shares_vested for v in projected_rsu),
         },
         "espp": {
-            "total_contributions": espp_total_contrib,
-            "total_shares": espp_total_shares,
-            "total_discount_value": espp_total_discount,
+            "total_contributions": sum(p.contributions for p in actual_espp),
+            "total_shares": sum(p.shares_purchased for p in actual_espp if p.shares_purchased is not None),
+            "total_discount_value": sum(
+                p.discount_applied * p.shares_purchased
+                for p in actual_espp
+                if p.discount_applied is not None and p.shares_purchased is not None
+            ),
             "purchases_count": len(actual_espp),
             "pending_purchases_count": len(pending_espp),
             "pending_contributions": sum(p.contributions for p in pending_espp),
         },
         "totals": {
-            "total_income": total_income_with_rsu,
+            "total_income": total_income,
             "total_taxes": total_taxes,
-            "total_net": total_net_cash + rsu_net_value,
-            "effective_tax_rate": effective_tax_rate
+            "total_net": total_net,
+            "effective_tax_rate": effective_tax_rate,
         },
         "engine_summaries": {
             "contributions": contrib_summary,
             "taxes": tax_summary,
-            "espp": espp_summary
-        }
+            "espp": espp_summary,
+        },
     }
 
 

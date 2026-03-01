@@ -1,7 +1,7 @@
 """ESPP (Employee Stock Purchase Plan) accrual and purchase engine."""
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from typing import List, Optional, Dict, Any
 import logging
 
@@ -27,6 +27,7 @@ class ESPPPurchase:
     lookback_months: int = 0
     fractional_shares_allowed: bool = False
     is_pending: bool = False
+    carryforward: Optional[float] = None
 
 
 class ESPPEngine:
@@ -52,6 +53,10 @@ class ESPPEngine:
         # Store annual limit as instance attribute so it can be updated per year
         self.annual_limit = self.config.annual_limit_usd
 
+        # Track current offering/subscription state (for reset logic)
+        self._offering_start_date = None
+        self._offering_price = None
+
         # Validation
         if self.config.enabled and not self.config.offering.first_offer_date:
             raise ValueError("ESPP enabled but no first_offer_date specified")
@@ -64,8 +69,13 @@ class ESPPEngine:
                           period_date: date) -> float:
         """Accrue ESPP contribution for a pay period.
 
-        Contributions accrue freely based on espp_pct. The annual limit is
-        enforced at purchase time, not accrual time.
+        If there is still a purchase remaining in the current calendar year,
+        contributions are capped so that cycle_contributions + ytd_purchase_amount
+        never exceeds the annual limit.  Once the limit is reached, withholding
+        stops and the money stays in the paycheck.
+
+        After the last purchase month of the year, contributions accrue freely
+        because they belong to the *next* year's purchase cycle.
 
         Args:
             gross_pay: Gross pay for the period
@@ -73,7 +83,8 @@ class ESPPEngine:
             period_date: Date of the pay period
 
         Returns:
-            Actual ESPP contribution amount
+            Actual ESPP contribution amount (may be less than desired when
+            the annual limit is reached)
         """
         if not self.config.enabled:
             return 0.0
@@ -89,8 +100,23 @@ class ESPPEngine:
         if desired_contribution <= 0:
             return 0.0
 
-        # Contributions accrue freely — annual limit applied at purchase time
         actual_contribution = desired_contribution
+
+        # If there is a purchase still ahead in this calendar year, cap
+        # contributions so the next purchase won't exceed the annual limit.
+        # After the last purchase month, contributions flow freely into the
+        # next year's cycle.
+        has_remaining_purchase = any(
+            m >= period_date.month for m in self.config.purchase_months
+        )
+        if has_remaining_purchase:
+            remaining_limit = max(
+                0, self.annual_limit - self.ytd_purchase_amount - self.cycle_contributions
+            )
+            actual_contribution = min(actual_contribution, remaining_limit)
+
+        if actual_contribution <= 0:
+            return 0.0
 
         # Track contributions
         self.ytd_contributions += actual_contribution
@@ -118,7 +144,8 @@ class ESPPEngine:
         if purchase_month not in self.config.purchase_months:
             return None
 
-        # Cap usable contributions to annual purchase limit
+        # Cap at annual purchase limit — contributions accrue freely (they may
+        # be for next year's purchase), so this is where the IRS limit is enforced.
         usable_contributions = min(
             self.cycle_contributions,
             max(0, self.annual_limit - self.ytd_purchase_amount)
@@ -128,14 +155,17 @@ class ESPPEngine:
             logger.debug(f"ESPP annual purchase limit reached for {purchase_year}")
             return None
 
+        import calendar
         today = date.today()
 
-        # Check if this is a future purchase
-        if purchase_year > today.year or (purchase_year == today.year and purchase_month >= today.month):
+        # Check if this is a future purchase (purchase month hasn't ended yet)
+        last_day = calendar.monthrange(purchase_year, purchase_month)[1]
+        purchase_month_end = date(purchase_year, purchase_month, last_day)
+        if today < purchase_month_end:
             # Future purchase — create pending record
             purchase = ESPPPurchase(
                 cycle_id=f"{purchase_year}-{purchase_month:02d}",
-                offering_start_date=self.config.offering.first_offer_date or date(purchase_year, 1, 1),
+                offering_start_date=self._offering_start_date or self.config.offering.first_offer_date or date(purchase_year, 1, 1),
                 contributions=usable_contributions,
                 lookback_months=self.config.offering.lookback_months,
                 fractional_shares_allowed=self.config.allow_fractional_shares,
@@ -187,11 +217,16 @@ class ESPPEngine:
             self.purchases.append(purchase)
             self.ytd_purchase_amount += usable_contributions
 
-            # Reset cycle contributions (subtract what was used)
-            self.cycle_contributions = max(0, self.cycle_contributions - usable_contributions)
+            # Whole-share remainder carries forward to the next purchase period
+            actual_cost = shares_purchased * purchase_price
+            self.cycle_contributions = usable_contributions - actual_cost
+            purchase.carryforward = self.cycle_contributions
 
             logger.info(f"ESPP purchase: {shares_purchased:.4f} shares @ "
                        f"${purchase_price:.2f} on {purchase_date}")
+
+            # Check if the offering/subscription price should reset
+            self._check_offering_reset(purchase_date)
 
             return purchase
 
@@ -232,7 +267,12 @@ class ESPPEngine:
             raise ValueError(f"Unknown purchase day rule: {self.config.purchase_day_rule}")
 
     def _get_offering_start_price(self, purchase_date: date) -> tuple[date, float]:
-        """Get offering start date and price based on lookback period.
+        """Get offering start date and price, accounting for resets.
+
+        On the first resolved purchase the subscription price is initialized
+        from the configured first_offer_date (or lookback).  After each
+        purchase, _check_offering_reset may lower the subscription price if the
+        stock opened the next period at a lower level.
 
         Args:
             purchase_date: Date of purchase
@@ -240,22 +280,49 @@ class ESPPEngine:
         Returns:
             Tuple of (offering_start_date, offering_price)
         """
+        if self._offering_price is not None:
+            return self._offering_start_date, self._offering_price
+
+        # First resolved purchase — initialize from config
         if self.config.offering.first_offer_date:
-            # Use configured first offer date
             offering_start_date = self.config.offering.first_offer_date
         else:
-            # Calculate lookback date
             from dateutil.relativedelta import relativedelta
             offering_start_date = purchase_date - relativedelta(
                 months=self.config.offering.lookback_months
             )
 
-        # Get price on offering start date
         offering_price = self.price_fetcher.get_price_on_or_before(offering_start_date)
         if offering_price is None:
             raise ValueError(f"No price available for offering start date {offering_start_date}")
 
+        self._offering_start_date = offering_start_date
+        self._offering_price = offering_price
         return offering_start_date, offering_price
+
+    def _check_offering_reset(self, purchase_date: date) -> None:
+        """Check if the subscription price should reset after a purchase.
+
+        If the closing price on the first trading day after a purchase is lower
+        than the current subscription price, the offering resets to the new
+        lower price.
+        """
+        today = date.today()
+
+        for i in range(1, 10):
+            check_date = purchase_date + timedelta(days=i)
+            if check_date > today:
+                return  # Can't check future dates
+            price = self.price_fetcher.get_price(check_date)
+            if price is not None:
+                if price < self._offering_price:
+                    logger.info(
+                        f"ESPP offering reset: {check_date} price ${price:.2f} < "
+                        f"subscription price ${self._offering_price:.2f}"
+                    )
+                    self._offering_start_date = check_date
+                    self._offering_price = price
+                return
 
     def _calculate_purchase_price(self, offering_price: float,
                                 purchase_day_price: float) -> float:
