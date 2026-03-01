@@ -9,12 +9,13 @@ A multi-year paycheck projection tool with support for ESPP, RSU vesting, 401(k)
 - **Per-year configuration overrides** for salary, contribution schedules, IRS limits, and more
 - **ESPP (Employee Stock Purchase Plan)** with 24-month lookback, configurable discount, and purchase limits
 - **RSU (Restricted Stock Unit)** vesting with multiple schedule types, target-value grants, whole-share rounding, and FMV at market open
-- **401(k) contributions** with IRS limit enforcement (402(g) and 415(c)) and configurable employer match tiers
+- **401(k) contributions** with IRS limit enforcement (402(g) and 415(c)), configurable employer match tiers, and optional employer-match inclusion in 415(c)
 - **Tax withholding** using python-taxes and tenforty for federal/state calculations, plus FICA and CA voluntary
-- **First year adjustments** for sign-on bonus, taxed/untaxed relocation, with proper tax treatment
+- **First year adjustments** for sign-on bonus (with explicit 401k contribution rates), taxed/untaxed relocation, with proper tax treatment
 - **Weekend pay date adjustment** (Saturday/Sunday rolls to preceding Friday)
 - **Market data** via yfinance with multi-field local caching (Open, Close, etc.)
-- **Money ledger** with unified transaction log and stable sort ordering across event types
+- **Money ledger** with unified transaction log, stable sort ordering across event types, and effective tax rate
+- **Year summary** derived directly from the money ledger TOTAL row, ensuring consistency between logged output and CSV
 
 ## Installation
 
@@ -117,6 +118,9 @@ payroll:
 
   first_year_adjustments:
     sign_on_bonus: 25000
+    sign_on_pretax_401k_pct: 0.28       # 401(k) contribution rates for sign-on
+    sign_on_roth_401k_pct: 0.00
+    sign_on_aftertax_401k_pct: 0.00
     relocation_taxed: 5000
     relocation_itemized: 280
     relocation_tax_advantaged: 3500
@@ -149,7 +153,7 @@ rsu_grants:
 
 #### Per-Year Overrides
 
-Override any payroll parameter for specific years:
+Override any payroll parameter for specific years. Per-year `limits` overrides are **merged** with the base config — only explicitly set fields are overridden, so unspecified fields (e.g., `include_employer_in_415c`) are preserved.
 
 ```yaml
 per_year:
@@ -157,11 +161,14 @@ per_year:
     salary_annual: 170000
     first_year_adjustments:
       sign_on_bonus: 25000
+      sign_on_pretax_401k_pct: 0.28
     contribution_schedule:
       pretax_401k_pct: [0.28, 0.19]
   2026:
     salary_annual: 170000
     health_deductions_per_period: [3]
+    limits:
+      irs_415c_annual_additions: 72000   # Only this field overridden; others inherited
     contribution_schedule:
       pretax_401k_pct: [0.15, 0.15, 0.15, 0.15, 0.15, 0.14, 0.14, 0.14, 0.14, 0.14, 0.14, 0.14]
 ```
@@ -208,10 +215,12 @@ Columns: `pay_date`, `kind`, `gross_pay`, `extra_income`, `group_term_life`, `ea
 Unified transaction log for all income events in chronological order:
 - Wages (pay periods)
 - RSU vests (with FMV, shares, tax breakdown)
-- ESPP purchases (with shares, discount)
+- ESPP purchases (with shares acquired — contribution amounts are tracked in wage events only, not duplicated on purchase rows)
 - First-year adjustments (sign-on, relocation)
 
 Events on the same date are stably ordered: adjustments first, then wages, then ESPP, then RSU.
+
+The TOTAL row includes an `effective_tax_rate` column (total taxes / gross income). The logged year summary is derived directly from this TOTAL row.
 
 ### ESPP Purchases (`espp_YYYY.csv`)
 
@@ -252,3 +261,5 @@ src/paycheck/
 - ESPP cycle contributions span years (not reset on YTD reset); annual limit enforced at purchase time
 - RSU FMV uses market open price on vest date; shares are whole numbers via cumulative floor rounding
 - Pay dates falling on weekends are rolled to the preceding Friday
+- 415(c) enforcement optionally includes employer match (`include_employer_in_415c: true`); per-year limits overrides merge with the base config, preserving unspecified fields
+- Sign-on bonus 401(k) contributions use their own explicit rates (`sign_on_pretax_401k_pct`, etc.) rather than inheriting from the first pay period
