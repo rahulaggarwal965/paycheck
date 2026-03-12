@@ -77,6 +77,7 @@ class ESPPConfig(BaseModel):
     discount_pct: float = Field(default=0.15, ge=0.0, le=0.5, description="Discount percentage")
     annual_limit_usd: PositiveFloat = Field(default=21250, description="Annual contribution limit")
     limit_mode: Literal["contribution_usd", "fmv_usd"] = "contribution_usd"
+    max_contribution_pct: float = Field(default=0.25, ge=0.01, le=1.0, description="Maximum ESPP contribution percentage")
     allow_fractional_shares: bool = False
     purchase_months: List[int] = Field(default=[2, 8], description="Purchase months")
     purchase_day_rule: Literal["last_trading_day", "15th", "last_day"] = "last_trading_day"
@@ -260,9 +261,16 @@ class RSUGrant(BaseModel):
         return self
 
 
+class Raise(BaseModel):
+    """Mid-year salary raise."""
+    effective_date: date = Field(description="Date the raise takes effect")
+    salary_annual: PositiveFloat = Field(description="New annual salary")
+
+
 class PerYearOverrides(BaseModel):
     """Per-year configuration overrides for multi-year projections."""
     salary_annual: Optional[PositiveFloat] = Field(default=None, description="Override annual salary")
+    raises: Optional[List["Raise"]] = Field(default=None, description="Mid-year salary raises with effective dates")
     contribution_schedule: Optional[ContributionSchedule] = Field(default=None, description="Override contribution schedule")
     limits: Optional[LimitsConfig] = Field(default=None, description="Override IRS limits")
     tax_year: Optional[int] = Field(default=None, description="Override tax year (defaults to calendar year)")

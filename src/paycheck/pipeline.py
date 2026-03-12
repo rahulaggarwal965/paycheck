@@ -1,11 +1,13 @@
 """Main computation pipeline integrating all engines."""
 
 import logging
+from datetime import date
 from typing import Any, Dict, List, TypedDict, Union
 
 import polars as pl
 
 from paycheck.config_models import AppConfig
+from paycheck.contrib.optimizer import compute_optimal_401k_schedule, compute_optimal_espp_schedule
 from paycheck.contrib.engine import ContributionEngine
 from paycheck.espp.engine import ESPPEngine
 from paycheck.mappers.legacy import process_first_year_adjustments
@@ -33,6 +35,7 @@ class YearConfig:
 
     def __init__(self, config: AppConfig, year: int):
         self.salary_annual = config.payroll.salary_annual
+        self.raises = []
         self.contribution_schedule = config.payroll.contribution_schedule
         self.limits = config.limits
         self.tax_year = year  # Default to calendar year
@@ -59,6 +62,8 @@ def resolve_year_config(config: AppConfig, year: int) -> YearConfig:
         overrides = config.per_year[year]
         if overrides.salary_annual is not None:
             yc.salary_annual = overrides.salary_annual
+        if overrides.raises is not None:
+            yc.raises = sorted(overrides.raises, key=lambda r: r.effective_date)
         if overrides.contribution_schedule is not None:
             yc.contribution_schedule = overrides.contribution_schedule
         if overrides.limits is not None:
@@ -143,7 +148,29 @@ def run_paycheck_pipeline(config: AppConfig) -> None:
             start_date=config.person.start_date,
             ledger_events=year_results.get("ledger_events"),
         )
-        
+
+        # Compute and write optimal contribution schedules
+        run_today = date.today()
+        optimal_401k = compute_optimal_401k_schedule(
+            periods_data=year_results["periods_data"],
+            first_year_adjustments=year_results.get("first_year_adjustments"),
+            year_config=year_config,
+            config=config,
+            today=run_today,
+        )
+        optimal_espp = compute_optimal_espp_schedule(
+            periods_data=year_results["periods_data"],
+            year_config=year_config,
+            config=config,
+            today=run_today,
+            espp_purchases=year_results["espp_purchases"],
+        )
+        optimal_path = engines["output_writer"].write_optimal_schedule(
+            optimal_401k, optimal_espp, year
+        )
+        if optimal_path:
+            written_files["optimal_schedule"] = optimal_path
+
         # Log summary
         _log_year_summary(year, year_results, written_files)
     
@@ -244,11 +271,17 @@ def _process_year(config, engines: Dict[str, Any], year: int,
             "first_year_adjustments": None
         }
 
+    # Resolve per-period salaries (handles mid-year raises)
+    salary_per_period = _resolve_per_period_salaries(
+        cfg.salary_annual, cfg.raises, year_periods
+    )
+
     # Expand per-period schedules for the year (contributions + payroll amounts)
     num_periods = year_periods.height
     contribution_pcts = _expand_per_period_schedules(
         cfg.contribution_schedule, cfg, num_periods
     )
+    contribution_pcts["salary_annual"] = salary_per_period
 
     # Process first year adjustments if this year has adjustments configured
     first_year_adjustments = None
@@ -291,6 +324,38 @@ def _process_year(config, engines: Dict[str, Any], year: int,
         "first_year_adjustments": first_year_adjustments,
         "ledger_events": ledger_events,
     }
+
+
+def _resolve_per_period_salaries(
+    base_salary: float, raises: list, year_periods: "pl.DataFrame"
+) -> List[float]:
+    """Resolve raises into a per-period salary list.
+
+    For each period, picks the latest raise whose effective_date <= period_start.
+    Falls back to base_salary for periods before any raise.
+
+    Args:
+        base_salary: Base annual salary for the year
+        raises: Sorted list of Raise objects (by effective_date)
+        year_periods: DataFrame of pay periods with period_start column
+
+    Returns:
+        List of per-period annual salary values
+    """
+    if not raises:
+        return [base_salary] * year_periods.height
+
+    salaries = []
+    for row in year_periods.iter_rows(named=True):
+        period_start = row["period_start"]
+        salary = base_salary
+        for r in raises:
+            if r.effective_date <= period_start:
+                salary = r.salary_annual
+            else:
+                break
+        salaries.append(salary)
+    return salaries
 
 
 def _expand_per_period_schedules(contribution_schedule, cfg, num_periods: int) -> Dict[str, List[float]]:
@@ -396,8 +461,8 @@ def _process_single_period(config, engines: Dict[str, Any], period_row: Dict[str
     Returns:
         Pay period result dictionary
     """
-    # Use resolved salary from year config if available
-    salary_annual = cfg.salary_annual if cfg else config.payroll.salary_annual
+    # Use per-period salary (already resolved from raises in _process_year)
+    salary_annual = contribution_pcts["salary_annual"][idx]
 
     # Calculate gross pay (salary portion only)
     if config.calendar.pay_frequency == "semimonthly":

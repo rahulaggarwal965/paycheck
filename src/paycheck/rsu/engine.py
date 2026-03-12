@@ -164,25 +164,37 @@ class RSUEngine:
     
     def _calculate_shares_from_target_value(self, grant, grant_date: date) -> Tuple[float, float, date, date]:
         """Calculate shares from target value using 30-day average.
-        
+
         Args:
             grant: RSU grant configuration
             grant_date: Calculated grant date
-            
+
         Returns:
             Tuple of (calculated_shares, average_price, calc_period_start, calc_period_end)
         """
-        if grant.employment_start_date is None:
-            raise ValueError("employment_start_date required for target value calculation")
-        
-        # Calculate 30-day period ending on last day of employment start month
-        start_month_last_day = date(
-            grant.employment_start_date.year,
-            grant.employment_start_date.month,
-            self._get_last_day_of_month(grant.employment_start_date.year, grant.employment_start_date.month)
-        )
-        
-        calc_period_end = start_month_last_day
+        # Determine the 30-day period end date
+        share_calc = grant.share_calculation or {}
+        period_end_str = share_calc.get("period_end_date")
+
+        if period_end_str is not None:
+            # Explicit period end date from config
+            if isinstance(period_end_str, str):
+                calc_period_end = date.fromisoformat(period_end_str)
+            else:
+                calc_period_end = period_end_str
+        elif grant.employment_start_date is not None:
+            # Fall back to last day of employment start month
+            calc_period_end = date(
+                grant.employment_start_date.year,
+                grant.employment_start_date.month,
+                self._get_last_day_of_month(grant.employment_start_date.year, grant.employment_start_date.month)
+            )
+        else:
+            raise ValueError(
+                "Either share_calculation.period_end_date or employment_start_date "
+                "is required for target value calculation"
+            )
+
         calc_period_start = calc_period_end - timedelta(days=29)  # 30 days total
         
         # Get prices for the 30-day period
@@ -201,8 +213,8 @@ class RSUEngine:
         # Calculate average price
         average_price = sum(prices) / len(prices)
         
-        # Calculate shares (rounded down to nearest whole share)
-        calculated_shares = math.floor(grant.target_value_usd / average_price)
+        # Calculate shares (rounded to nearest whole share)
+        calculated_shares = round(grant.target_value_usd / average_price)
         
         logger.info(f"Target value calculation for {grant.grant_id}: "
                    f"${grant.target_value_usd:,.0f} ÷ ${average_price:.2f} = "
